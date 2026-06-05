@@ -1,0 +1,19 @@
+# Python deps for the GNPR-SID (V1) reproduction pipeline.
+# NOTE: torch is installed separately in prepare_env.slurm with the CUDA-matched
+# wheel index (cuda/12.8.0 -> cu128, torch >=2.7), so it is intentionally NOT
+# listed here.
+#
+# Upper bounds are deliberate: a bare `>=` lets pip grab a future release that is
+# skewed against the separately-pinned torch. That is exactly what broke this env
+# once (latest transformers needed torch.float8_e8m0fnu, absent in the cu124
+# torch 2.6 wheel). The ceilings below pin to the current compatible majors.
+transformers>=4.45.0,<4.60
+peft>=0.13.0,<0.20
+accelerate>=1.0.0,<2.0
+datasets>=2.20.0,<4.0
+sentencepiece>=0.2.0,<0.3
+safetensors>=0.4.3,<1.0
+scikit-learn>=1.3.0,<2.0      # RQ-VAE k-means init (V1/code/RQVAE/layers.py)
+pandas>=2.0.0,<3.0
+numpy>=1.24.0,<2.3
+tqdm>=4.66.0,<5.0
