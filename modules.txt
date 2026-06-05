@@ -1,0 +1,17 @@
+$ module avail
+------------------------------------------------ /cm/local/modulefiles -------------------------------------------------
+boost/1.81.0              cm-setup/11.0    gdb/16.2         module-git   prs             slurm/slurm/24.11
+cluster-tools/11.0        cmd              gmp/6.3.0        module-info  python3
+cm-bios-tools             cmsh             ipmitool/1.8.19  mpc/1.3.1    python312
+cm-image/11.0             dot              lua/5.4.7        mpfr/4.2.1   rocm-smi/4.3.0
+cm-nvfwupd/2.0.5          freeipmi/1.6.14  luajit           null         sedutil/1.16.0
+cm-scale/cm-scale.module  gcc/14.2.0       mariadb-libs     openldap     shared
+
+------------------------------------------------ /cm/shared/modulefiles ------------------------------------------------
+anaconda/25.5.1      fftw3/openmpi/gcc/64/3.3.10      hwloc2/2.8.0           netcdf/gcc/64/gcc/64/4.9.2
+blas/gcc/64/3.11.0   gcc/15.1                         iozone/3.494           netperf/2.7.0
+bonnie++/2.00a       gdb/16.3                         iperf/3.17.1           openblas/dynamic/(default)
+cm-pmix3/3.1.7       globalarrays/openmpi/gcc/64/5.8  lapack/gcc/64/3.11.0   openblas/dynamic/0.3.28
+cm-pmix4/4.1.3       hdf5/1.14.0                      miniconda3/25.5.1      openmpi/gcc/64/4.1.5
+cuda/12.8.0          hdf5_18/1.8.21                   mpich/ge/gcc/64/4.1.1  openmpi4/gcc/4.1.5
+default-environment  hwloc/1.11.13
