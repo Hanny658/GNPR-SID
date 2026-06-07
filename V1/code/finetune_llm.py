@@ -154,12 +154,17 @@ def parse_args():
     p.add_argument("--output_dir", required=True)
     p.add_argument("--tuning", choices=["lora", "full"], default=os.environ.get("TUNING", "lora"))
     p.add_argument("--add_sid_tokens", type=int, default=int(os.environ.get("ADD_SID_TOKENS", "0")))
-    p.add_argument("--num_epochs", type=float, default=float(os.environ.get("NUM_EPOCHS", "3")))
-    p.add_argument("--per_device_bs", type=int, default=int(os.environ.get("PER_DEVICE_BS", "4")))
-    p.add_argument("--grad_accum", type=int, default=int(os.environ.get("GRAD_ACCUM", "4")))
-    p.add_argument("--lr", type=float, default=float(os.environ.get("LR", "2e-5")))
+    p.add_argument("--num_epochs", type=float, default=float(os.environ.get("NUM_EPOCHS", "8")))
+    p.add_argument("--per_device_bs", type=int, default=int(os.environ.get("PER_DEVICE_BS", "2")))
+    p.add_argument("--grad_accum", type=int, default=int(os.environ.get("GRAD_ACCUM", "32")))
+    p.add_argument("--lr", type=float, default=float(os.environ.get("LR", "1e-5")))
+    p.add_argument("--lr_scheduler", default=os.environ.get("LR_SCHEDULER", "constant_with_warmup"))
+    p.add_argument("--warmup_steps", type=int, default=int(os.environ.get("WARMUP_STEPS", "20")))
+    p.add_argument("--lora_r", type=int, default=int(os.environ.get("LORA_R", "16")))
+    p.add_argument("--lora_alpha", type=int, default=int(os.environ.get("LORA_ALPHA", "32")))
+    p.add_argument("--lora_dropout", type=float, default=float(os.environ.get("LORA_DROPOUT", "0.1")))
     p.add_argument("--max_seq_len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "2048")))
-    p.add_argument("--save_steps", type=int, default=int(os.environ.get("SAVE_STEPS", "200")))
+    p.add_argument("--save_steps", type=int, default=int(os.environ.get("SAVE_STEPS", "50")))
     p.add_argument("--save_total_limit", type=int, default=int(os.environ.get("SAVE_TOTAL_LIMIT", "5")))
     p.add_argument("--eval_during_train", type=int, default=int(os.environ.get("EVAL_DURING_TRAIN", "0")))
     p.add_argument("--seed", type=int, default=42)
@@ -211,9 +216,9 @@ def main():
 
         modules_to_save = ["embed_tokens", "lm_head"] if args.add_sid_tokens else None
         lora_cfg = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.05,
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
             bias="none",
             task_type="CAUSAL_LM",
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
@@ -239,8 +244,8 @@ def main():
         per_device_eval_batch_size=args.per_device_bs,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
+        lr_scheduler_type=args.lr_scheduler,
+        warmup_steps=args.warmup_steps,
         weight_decay=0.0,
         logging_steps=10,
         save_strategy="steps",

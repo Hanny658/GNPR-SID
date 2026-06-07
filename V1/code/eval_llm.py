@@ -62,7 +62,7 @@ def parse_args():
     p.add_argument("--num_beams", type=int, default=int(os.environ.get("NUM_BEAMS", "10")))
     p.add_argument("--max_new_tokens", type=int, default=int(os.environ.get("EVAL_MAX_NEW_TOKENS", "12")))
     p.add_argument("--max_prompt_len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "2048")))
-    p.add_argument("--batch_size", type=int, default=int(os.environ.get("EVAL_BATCH_SIZE", "8")))
+    p.add_argument("--batch_size", type=int, default=int(os.environ.get("EVAL_BATCH_SIZE", "4")))
     p.add_argument("--ks", type=int, nargs="+",
                    default=[int(k) for k in os.environ.get("EVAL_KS", "1 5 10").split()])
     p.add_argument("--flush_every", type=int, default=int(os.environ.get("EVAL_FLUSH_EVERY", "200")))
