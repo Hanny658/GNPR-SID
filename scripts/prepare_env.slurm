@@ -54,7 +54,12 @@ READY_MARK="${CONDA_ENV_PREFIX}/.env_ready"
 if [[ -f "${READY_MARK}" && "${FORCE_REBUILD:-0}" != "1" ]]; then
     echo "[prep] env already prepared at ${CONDA_ENV_PREFIX} (FORCE_REBUILD=1 to rebuild)."
     activate_conda
-    echo "[prep] nothing to do."
+    # Env is built, but the *data* for this DATASET may still be missing -- this
+    # lets `DATASET=tky sbatch scripts/prepare_env.slurm` fetch raw data without
+    # rebuilding the whole env. Skips nyc / already-present data.
+    echo "[prep] ensuring raw data for DATASET=${DATASET}"
+    fetch_dataset || echo "[prep] WARN: raw data not fetched (see message above)."
+    echo "[prep] nothing else to do."
     exit 0
 fi
 
@@ -108,6 +113,22 @@ snapshot_download(os.environ["BASE_MODEL"],
                   allow_patterns=["*.json", "*.model", "*.safetensors", "tokenizer*", "*.txt"])
 print("[prep] base model cached")
 PY
+
+# ---- fetch the dataset's raw check-ins (skips nyc / already-present data) ----
+# Downloads into RAW_DIR so scripts/data.slurm can build llm_*.json offline.
+# Non-fatal: a missing source only warns (it doesn't break the env build), and
+# for non-prebaked datasets we also pre-cache the category encoder.
+echo "[prep] ensuring raw data for DATASET=${DATASET}"
+fetch_dataset || echo "[prep] WARN: raw data not fetched (see message above); env build continues."
+if ! is_prebaked; then
+    echo "[prep] pre-fetching category encoder ${CAT_MODEL}"
+    python - <<PY || echo "[prep] WARN: category encoder pre-fetch skipped/failed (retried at build time)"
+import os
+from sentence_transformers import SentenceTransformer
+SentenceTransformer(os.environ.get("CAT_MODEL", "all-MiniLM-L6-v2"))
+print("[prep] category encoder cached")
+PY
+fi
 
 mkdir -p "${CONDA_ENV_PREFIX}"
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "${READY_MARK}"

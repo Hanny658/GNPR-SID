@@ -65,6 +65,7 @@ python "${CODE_DIR}/eval_llm.py" \
     --num_beams "${NUM_BEAMS}" \
     --max_new_tokens "${EVAL_MAX_NEW_TOKENS}" \
     --max_prompt_len "${MAX_SEQ_LEN}" \
+    --batch_size "${EVAL_BATCH_SIZE}" \
     --ks ${EVAL_KS}
 
 mark_done eval

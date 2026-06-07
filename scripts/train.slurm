@@ -90,7 +90,14 @@ fi
 # ============================ Phase 2: LLM fine-tune ========================
 TRAIN_JSON="${DATA_DIR}/llm_train.json"
 VAL_JSON="${DATA_DIR}/llm_val.json"
-[[ -f "${TRAIN_JSON}" ]] || { echo "[train] ERROR: missing ${TRAIN_JSON}" >&2; exit 1; }
+if [[ ! -f "${TRAIN_JSON}" ]]; then
+    echo "[train] ERROR: missing ${TRAIN_JSON}" >&2
+    if ! is_prebaked; then
+        echo "[train]        ${DATASET} has no pre-baked JSON -- build it first with:" >&2
+        echo "[train]            DATASET=${DATASET} sbatch scripts/data.slurm" >&2
+    fi
+    exit 1
+fi
 
 echo "[train] Phase 2: LoRA fine-tuning ${BASE_MODEL}"
 FT_ARGS=(
@@ -103,6 +110,11 @@ FT_ARGS=(
     --per_device_bs "${PER_DEVICE_BS}"
     --grad_accum "${GRAD_ACCUM}"
     --lr "${LR}"
+    --lr_scheduler "${LR_SCHEDULER}"
+    --warmup_steps "${WARMUP_STEPS}"
+    --lora_r "${LORA_R}"
+    --lora_alpha "${LORA_ALPHA}"
+    --lora_dropout "${LORA_DROPOUT}"
     --max_seq_len "${MAX_SEQ_LEN}"
     --save_steps "${SAVE_STEPS}"
     --save_total_limit "${SAVE_TOTAL_LIMIT}"
