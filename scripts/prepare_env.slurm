@@ -54,11 +54,26 @@ READY_MARK="${CONDA_ENV_PREFIX}/.env_ready"
 if [[ -f "${READY_MARK}" && "${FORCE_REBUILD:-0}" != "1" ]]; then
     echo "[prep] env already prepared at ${CONDA_ENV_PREFIX} (FORCE_REBUILD=1 to rebuild)."
     activate_conda
+    # Top up any requirements added since the env was first built (idempotent: pip
+    # skips already-satisfied specs, and torch is NOT in requirements.txt so it is
+    # left untouched). This is what makes a plain re-submit pick up new deps such
+    # as sentence-transformers / gdown WITHOUT a full FORCE_REBUILD.
+    echo "[prep] syncing requirements (top-up for any newly added deps)"
+    python -m pip install -r "${PROJECT_ROOT}/scripts/requirements.txt"
     # Env is built, but the *data* for this DATASET may still be missing -- this
     # lets `DATASET=tky sbatch scripts/prepare_env.slurm` fetch raw data without
     # rebuilding the whole env. Skips nyc / already-present data.
     echo "[prep] ensuring raw data for DATASET=${DATASET}"
     fetch_dataset || echo "[prep] WARN: raw data not fetched (see message above)."
+    if ! is_prebaked; then
+        echo "[prep] pre-fetching category encoder ${CAT_MODEL}"
+        python - <<'PY' || echo "[prep] WARN: category encoder pre-fetch skipped/failed (retried at build time)"
+import os
+from sentence_transformers import SentenceTransformer
+SentenceTransformer(os.environ.get("CAT_MODEL", "all-MiniLM-L6-v2"))
+print("[prep] category encoder cached")
+PY
+    fi
     echo "[prep] nothing else to do."
     exit 0
 fi

@@ -57,6 +57,14 @@ fi
 # Make sure the raw check-ins are here (downloads if a source is configured).
 fetch_dataset || { echo "[data] ERROR: raw data unavailable; cannot build." >&2; exit 1; }
 
+# Self-heal: the SID build needs sentence-transformers (stage 2). If the env was
+# built before that dep was added to requirements.txt, top it up here instead of
+# forcing a full env rebuild. Cheap when already satisfied (just an import check).
+if ! python -c "import sentence_transformers" 2>/dev/null; then
+    echo "[data] build deps missing; syncing requirements.txt into the env"
+    python -m pip install -r "${PROJECT_ROOT}/scripts/requirements.txt"
+fi
+
 echo "[data] building Semantic-ID dataset for ${DATASET} (V2 CRQVAE)"
 python "${CODE_DIR}/build_dataset.py" \
     --dataset "${DATASET}" \
