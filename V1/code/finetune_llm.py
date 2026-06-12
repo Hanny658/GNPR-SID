@@ -163,6 +163,12 @@ def parse_args():
     p.add_argument("--lora_r", type=int, default=int(os.environ.get("LORA_R", "16")))
     p.add_argument("--lora_alpha", type=int, default=int(os.environ.get("LORA_ALPHA", "32")))
     p.add_argument("--lora_dropout", type=float, default=float(os.environ.get("LORA_DROPOUT", "0.1")))
+    # Comma/space-separated module names. The V2 pipeline overrides this: the
+    # alignment stage trains "embed_tokens" only; its SFT drops o_proj/down_proj.
+    p.add_argument("--lora_targets",
+                   default=os.environ.get("LORA_TARGETS",
+                                          "q_proj,k_proj,v_proj,o_proj,"
+                                          "gate_proj,up_proj,down_proj"))
     p.add_argument("--max_seq_len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "2048")))
     p.add_argument("--save_steps", type=int, default=int(os.environ.get("SAVE_STEPS", "50")))
     p.add_argument("--save_total_limit", type=int, default=int(os.environ.get("SAVE_TOTAL_LIMIT", "5")))
@@ -214,6 +220,7 @@ def main():
     if args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
 
+        target_modules = [t for t in re.split(r"[,\s]+", args.lora_targets.strip()) if t]
         modules_to_save = ["embed_tokens", "lm_head"] if args.add_sid_tokens else None
         lora_cfg = LoraConfig(
             r=args.lora_r,
@@ -221,8 +228,7 @@ def main():
             lora_dropout=args.lora_dropout,
             bias="none",
             task_type="CAUSAL_LM",
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj"],
+            target_modules=target_modules,
             modules_to_save=modules_to_save,
         )
         model = get_peft_model(model, lora_cfg)

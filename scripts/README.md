@@ -12,11 +12,16 @@ scripts/
 ├── prepare_env.slurm # one-time: build the conda env + download raw data
 ├── data.slurm        # (TKY/CA only) build Semantic-ID llm_*.json from raw check-ins
 ├── train.slurm       # (optional) RQ-VAE ID-gen  +  LLM LoRA fine-tune
-└── eval.slurm        # generative eval: Acc@k / MRR / NDCG@k
+├── eval.slurm        # generative eval: Acc@k / MRR / NDCG@k
+├── v2_env.sh         # fully-V2 pipeline: V2 recipe knobs + V2/runs/ layout
+├── v2_data.slurm     # fully-V2: SID build + SID<->attribute alignment data
+├── v2_train.slurm    # fully-V2: [align -> merge ->] SFT (V2 hyper-parameters)
+└── v2_eval.slurm     # fully-V2: same eval protocol on the V2 run
 ```
 
 The fine-tune/eval/data-build Python drivers live in `V1/code/`:
-`finetune_llm.py`, `eval_llm.py`, `build_dataset.py`.
+`finetune_llm.py`, `eval_llm.py`, `build_dataset.py`, plus the V2-pipeline
+helpers `build_align_data.py` and `merge_adapter.py`.
 
 ## Quick start
 
@@ -131,6 +136,51 @@ DATASET=tky sbatch scripts/eval.slurm
 
 `data.slurm` is idempotent: every stage skips when its output exists, and the job
 is a no-op once `llm_*.json` is present.
+
+## Fully-V2 pipeline (`v2_*.slurm`)
+
+The default `train.slurm`/`eval.slurm` reproduce the **V1 paper recipe** (for
+TKY/CA on top of V2-built SIDs). The `v2_*` scripts instead run the authors'
+**V2 LLM recipe** (`V2/LLM/train/*` + `V2/dataprocess/get_align_data.ipynb`)
+end-to-end, with its own run dir (`V2/runs/<ds>_<model>_v2`) and markers so V1
+and V2 runs of the same dataset/model coexist:
+
+```
+v2_data.slurm   raw -> CRQVAE SIDs -> llm_*.json  AND  llm_align_{train,val}.json
+                (alignment data: per POI, attributes<->SID instruction pairs)
+v2_train.slurm  Phase A  align:  LoRA on embed_tokens ONLY, on the align data
+                Phase B  merge:  alignment LoRA folded into the base model
+                Phase C  SFT:    LoRA(q,k,v,gate,up), lr 2e-5, 5 epochs, len 3072
+v2_eval.slurm   beam-search Acc@k / MRR / NDCG@k on llm_test.json
+```
+
+```bash
+DATASET=tky sbatch scripts/v2_data.slurm    # SID build (no-op if done) + align data
+DATASET=tky sbatch scripts/v2_train.slurm   # align -> merge -> SFT (resumable)
+DATASET=tky sbatch scripts/v2_eval.slurm    # metrics -> V2/runs/<run>/eval/
+```
+
+Set `V2_ALIGN=0` to skip the alignment/merge stages (= the authors'
+`sft_without_alignment.py`, which LoRA-tunes `q,k,v,o,gate,up` directly on the
+raw base model).
+
+Notes / caveats:
+
+- **No published V2 reference numbers exist** (`V2/V2.md` reports none), so V2
+  results can't be checked against the paper — the paper's table is V1.
+- The stages are driven by our `finetune_llm.py` with the V2 hyper-parameters
+  rather than `V2/LLM/train/*.py` as shipped: those scripts have blanked-out
+  paths, hard-coded wandb logging, a Llama-3-only `<|eot_id|>` literal in the
+  prompt, and no checkpoint resume (the V2 README itself recommends not using
+  them directly). The recipe (LoRA targets, lr, epochs, batch, cutoff, warm-up)
+  follows their `__main__` values; override via `V2_*` env knobs (see
+  `v2_env.sh`).
+- **Alignment needs `poi_info.csv` + `codebook.csv`** (left behind by the SID
+  build). Prebaked NYC has neither — run NYC with `V2_ALIGN=0`, or force a
+  from-raw V2 rebuild with `PREBAKED_DATASETS="" sbatch scripts/v2_data.slurm`.
+- The authors' effective SFT batch is 8×2 = 16 (vs 64 in the V1 paper recipe);
+  per-device batch 8 at length 3072 fits a 1.5B model on the L40S but may OOM
+  with an 8B base — lower `V2_SFT_BS` (and raise `V2_SFT_ACCUM`) if so.
 
 ## Resume / "skip when finished" semantics
 
