@@ -15,13 +15,14 @@ scripts/
 ├── eval.slurm        # generative eval: Acc@k / MRR / NDCG@k
 ├── v2_env.sh         # fully-V2 pipeline: V2 recipe knobs + V2/runs/ layout
 ├── v2_data.slurm     # fully-V2: SID build + SID<->attribute alignment data
-├── v2_train.slurm    # fully-V2: [align -> merge ->] SFT (V2 hyper-parameters)
+├── v2_train.slurm    # fully-V2: [embed-align ->] SFT (V2 hyper-parameters)
 └── v2_eval.slurm     # fully-V2: same eval protocol on the V2 run
 ```
 
 The fine-tune/eval/data-build Python drivers live in `V1/code/`:
 `finetune_llm.py`, `eval_llm.py`, `build_dataset.py`, plus the V2-pipeline
-helpers `build_align_data.py` and `merge_adapter.py`.
+helper `build_align_data.py` (`merge_adapter.py` is also present for ad-hoc
+LoRA merges, but the V2 align path no longer needs it).
 
 ## Quick start
 
@@ -148,21 +149,24 @@ and V2 runs of the same dataset/model coexist:
 ```
 v2_data.slurm   raw -> CRQVAE SIDs -> llm_*.json  AND  llm_align_{train,val}.json
                 (alignment data: per POI, attributes<->SID instruction pairs)
-v2_train.slurm  Phase A  align:  LoRA on embed_tokens ONLY, on the align data
-                Phase B  merge:  alignment LoRA folded into the base model
-                Phase C  SFT:    LoRA(q,k,v,gate,up), lr 2e-5, 5 epochs, len 3072
+v2_train.slurm  Phase A  align:  add SID tokens, train ONLY the embeddings on the
+                                 align data -> a full SID-aware base model
+                Phase B  SFT:    LoRA(q,k,v,gate,up) on that base, lr 2e-5, 5 ep, len 3072
 v2_eval.slurm   beam-search Acc@k / MRR / NDCG@k on llm_test.json
 ```
 
 ```bash
 DATASET=tky sbatch scripts/v2_data.slurm    # SID build (no-op if done) + align data
-DATASET=tky sbatch scripts/v2_train.slurm   # align -> merge -> SFT (resumable)
+DATASET=tky sbatch scripts/v2_train.slurm   # align -> SFT (resumable)
 DATASET=tky sbatch scripts/v2_eval.slurm    # metrics -> V2/runs/<run>/eval/
 ```
 
-Set `V2_ALIGN=0` to skip the alignment/merge stages (= the authors'
-`sft_without_alignment.py`, which LoRA-tunes `q,k,v,o,gate,up` directly on the
-raw base model).
+The V2 recipe treats the SID atoms as **new vocabulary tokens** (the paper, §4.2,
+integrates SIDs into the LLM vocabulary; they are OOV and need the alignment
+stage to learn their embeddings). So the V2 pipeline forces `ADD_SID_TOKENS=1`
+when aligning. Set `V2_ALIGN=0` to skip alignment (= the authors'
+`sft_without_alignment.py`, LoRA-tuning `q,k,v,o,gate,up` directly on the raw
+base model); pair it with `ADD_SID_TOKENS=1` to still get atomic SID tokens.
 
 Notes / caveats:
 

@@ -59,10 +59,11 @@ if [[ ! -f "${MODEL_DIR}/_FINETUNE_COMPLETE" ]]; then
 fi
 [[ -f "${TEST_JSON}" ]] || { echo "[v2-eval] ERROR: missing ${TEST_JSON}" >&2; exit 1; }
 
-# The SFT adapter was trained on the alignment-merged base when phase B ran.
+# When alignment ran, the SFT adapter sits on top of the aligned full model
+# (which carries the SID-token embeddings), not the raw BASE_MODEL.
 EVAL_BASE="${BASE_MODEL}"
-if phase_done v2_merge && [[ -f "${MERGED_DIR}/_MERGE_COMPLETE" ]]; then
-    EVAL_BASE="${MERGED_DIR}"
+if phase_done v2_align && [[ -f "${ALIGN_DIR}/final/_FINETUNE_COMPLETE" ]]; then
+    EVAL_BASE="${ALIGN_DIR}/final"
 fi
 
 echo "[v2-eval] evaluating ${MODEL_DIR} (base: ${EVAL_BASE}) on ${TEST_JSON}"

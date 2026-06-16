@@ -39,7 +39,6 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from transformers.trainer_utils import get_last_checkpoint
 
 # Alpaca prompt; the model is supervised only on what follows "### Response:\n".
 PROMPT_TEMPLATE = (
@@ -152,7 +151,8 @@ def parse_args():
     p.add_argument("--train_file", required=True)
     p.add_argument("--val_file", default=None)
     p.add_argument("--output_dir", required=True)
-    p.add_argument("--tuning", choices=["lora", "full"], default=os.environ.get("TUNING", "lora"))
+    p.add_argument("--tuning", choices=["lora", "full", "embed"],
+                   default=os.environ.get("TUNING", "lora"))
     p.add_argument("--add_sid_tokens", type=int, default=int(os.environ.get("ADD_SID_TOKENS", "0")))
     p.add_argument("--num_epochs", type=float, default=float(os.environ.get("NUM_EPOCHS", "8")))
     p.add_argument("--per_device_bs", type=int, default=int(os.environ.get("PER_DEVICE_BS", "2")))
@@ -175,6 +175,49 @@ def parse_args():
     p.add_argument("--eval_during_train", type=int, default=int(os.environ.get("EVAL_DURING_TRAIN", "0")))
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
+
+
+def find_resume_checkpoint(output_dir):
+    """Latest *complete* checkpoint to resume from.
+
+    The HF Trainer writes ``trainer_state.json`` last (after the model weights,
+    optimizer and scheduler) and only deletes older checkpoints AFTER the new
+    one is fully written. So a job killed mid-save leaves a half-written newest
+    ``checkpoint-<step>`` (no ``trainer_state.json``) while the previous, complete
+    checkpoint still exists. ``get_last_checkpoint`` would pick that half-written
+    dir by step number and the resume would crash, so we instead take the newest
+    checkpoint that actually has ``trainer_state.json``. This makes resume robust
+    even with ``--save_total_limit 1``.
+    """
+    if not os.path.isdir(output_dir):
+        return None
+    def _complete(path):
+        ts = os.path.join(path, "trainer_state.json")
+        if not os.path.exists(ts):
+            return False
+        try:  # also reject a trainer_state.json truncated mid-write
+            with open(ts, encoding="utf-8") as f:
+                json.load(f)
+            return True
+        except Exception:
+            return False
+
+    complete, incomplete = [], []
+    for name in os.listdir(output_dir):
+        m = re.fullmatch(r"checkpoint-(\d+)", name)
+        if not m:
+            continue
+        step, path = int(m.group(1)), os.path.join(output_dir, name)
+        (complete if _complete(path) else incomplete).append((step, path))
+    if not complete:
+        return None
+    best_step, best = max(complete, key=lambda sp: sp[0])
+    for step, path in incomplete:
+        if step > best_step:
+            print(f"[finetune] WARNING: ignoring incomplete checkpoint {path} "
+                  f"(no trainer_state.json; likely killed mid-save) and resuming "
+                  f"from the last complete one instead")
+    return best
 
 
 def main():
@@ -217,11 +260,42 @@ def main():
     model.config.use_cache = False  # required with gradient checkpointing
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-    if args.tuning == "lora":
+    if args.tuning == "embed":
+        # Train ONLY the token embeddings (and the untied output head). This is
+        # the V2 SID-alignment stage: the freshly added SID tokens are OOV, so we
+        # learn their embeddings on the attribute<->SID data BEFORE the SFT.
+        # Deliberately NOT PEFT, because (a) the paper trains "only the embedding
+        # module", and (b) LoRA-on-embed_tokens collides with modules_to_save and
+        # is fragile to merge on tie_word_embeddings=True models. The result is a
+        # full model whose embeddings carry the alignment -- the SFT stage then
+        # uses it directly as its base, so no separate merge step is needed.
+        if not args.add_sid_tokens:
+            print("[finetune] WARNING: --tuning embed without --add_sid_tokens=1 "
+                  "trains the entire embedding matrix (no new SID tokens to learn).")
+        for p in model.parameters():
+            p.requires_grad = False
+        in_emb = model.get_input_embeddings()
+        in_emb.weight.requires_grad = True
+        out_emb = model.get_output_embeddings()
+        tied = out_emb is None or out_emb.weight is in_emb.weight
+        if not tied:
+            out_emb.weight.requires_grad = True
+        model.enable_input_require_grads()  # keep grad-checkpointing happy
+        n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        n_all = sum(p.numel() for p in model.parameters())
+        print(f"[finetune] embed-only: training {n_train:,}/{n_all:,} params "
+              f"({'tied' if tied else 'untied'} lm_head)")
+
+    elif args.tuning == "lora":
         from peft import LoraConfig, get_peft_model
 
         target_modules = [t for t in re.split(r"[,\s]+", args.lora_targets.strip()) if t]
-        modules_to_save = ["embed_tokens", "lm_head"] if args.add_sid_tokens else None
+        # don't mark a module both a LoRA target and to-save (PEFT excludes
+        # modules_to_save from targeting -> "no modules targeted" if they overlap)
+        modules_to_save = (["embed_tokens", "lm_head"] if args.add_sid_tokens else None)
+        if modules_to_save:
+            modules_to_save = [m for m in modules_to_save if m not in target_modules]
+            modules_to_save = modules_to_save or None
         lora_cfg = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
@@ -277,8 +351,9 @@ def main():
         data_collator=collator,
     )
 
-    # Resume from the newest checkpoint if one exists (handles 6h re-submits).
-    last_ckpt = get_last_checkpoint(args.output_dir) if os.path.isdir(args.output_dir) else None
+    # Resume from the newest *complete* checkpoint if one exists (handles 6h
+    # re-submits, and skips a half-written checkpoint left by a mid-save kill).
+    last_ckpt = find_resume_checkpoint(args.output_dir)
     if last_ckpt:
         print(f"[finetune] resuming from {last_ckpt}")
     else:
