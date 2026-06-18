@@ -242,6 +242,15 @@ Notes:
   4, effective batch preserved at 16 / 32 via `V2_SFT_ACCUM` / `V2_ALIGN_ACCUM`).
   If eval OOMs at length 3072 with 10 beams, drop `EVAL_BATCH_SIZE` to 2; raise
   the per-device batches for smaller models.
+- **Disk: the alignment phase saves a FULL model, not a LoRA adapter.**
+  `--tuning embed` trains the whole embedding matrix, so each checkpoint is the
+  entire ~16 GB 8B model (+ optimizer); rotation transiently needs ~2×. This is
+  the one heavy write the fusion adds over plain LoRA GenUP/GNPR-SID runs. The
+  align phase therefore defaults (`ALIGN_SAVE_STEPS` huge) to **no intermediate
+  checkpoints** — it writes the full model once at the end → `align/final`
+  (~16 GB, the SFT base). Budget ~16 GB per arm for `align/final` (B0 and B1 use
+  identical POI-only alignment, so you can reuse one across them); point
+  `RUN_DIR` at scratch if your home quota is tight.
 - **Offline / reproducible.** Profiles are rewritten deterministically from
   GenUP's committed JSON — no OpenAI key or network. Point `GENUP_DIR` /
   `GENUP_PROFILES_DIR` at GenUP's `data/<ds>/user_profiles`.

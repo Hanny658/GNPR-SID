@@ -94,7 +94,7 @@ if [[ "${V2_ALIGN}" == "1" ]]; then
             --lr_scheduler "${V2_LR_SCHEDULER}" \
             --warmup_steps "${V2_ALIGN_WARMUP}" \
             --max_seq_len "${V2_ALIGN_MAX_SEQ_LEN}" \
-            --save_steps "${SAVE_STEPS}" \
+            --save_steps "${ALIGN_SAVE_STEPS}" \
             --save_total_limit 1
         mark_done uaware_align
     fi

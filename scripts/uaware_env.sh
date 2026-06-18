@@ -49,6 +49,15 @@ export V2_ALIGN_MAX_SEQ_LEN="${V2_ALIGN_MAX_SEQ_LEN:-1024}"
 export V2_ALIGN_WARMUP="${V2_ALIGN_WARMUP:-180}"
 export V2_LORA_DROPOUT="${V2_LORA_DROPOUT:-0.05}"
 
+# The embed-alignment phase trains the FULL model (not LoRA), so each step
+# checkpoint writes the whole ~16GB 8B model + optimizer state, and rotation
+# transiently doubles that (~48GB) -- unlike the small LoRA adapters the SFT
+# phase / GenUP / plain GNPR-SID write. The phase is short (~1-2h, < one 6h
+# job), so by default we SKIP intermediate checkpoints and save the full model
+# just ONCE at the end (trainer.save_model -> align/final). Lower this only if
+# you need mid-align resume on a slow / frequently-preempted node.
+export ALIGN_SAVE_STEPS="${ALIGN_SAVE_STEPS:-100000000}"
+
 # ------------------------- user-aware knobs --------------------------------
 export PROFILE_MODE="${PROFILE_MODE:-sid}"          # sid | raw | none
 export GENUP_DIR="${GENUP_DIR:-${PROJECT_ROOT}/../GenUP}"
