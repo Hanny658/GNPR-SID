@@ -9,11 +9,19 @@ emits two instruction samples --
   2. Semantic ID -> attributes   ("describe the POI semantic code attributes")
 
 -- then shuffles and splits 90/10 into train/valid JSON (Alpaca schema), the
-data ``V2/LLM/train/align_sid.py`` trains its embedding-only LoRA on.
+data the embedding-only alignment stage (finetune_llm.py --tuning embed) trains on.
+
+When ``--user_profiles`` is given (the SID-aware profiles from
+rewrite_profile_sid.py), it ALSO emits one *profile -> SID* pair per user --
+input = the user's SID-aware profile (no affinity line), output = that user's
+top-N most-frequent SIDs -- so the alignment stage grounds user-conditioned SID
+priors alongside the POI<->attribute pairs (the GenUP x GNPR-SID fusion).
 
 Inputs are the artifacts ``build_dataset.py`` leaves in the dataset dir:
   poi_info.csv   [pid, category, latitude, longitude, visit_time_and_count]
   codebook.csv   [pid, sid, vector]   (sid = "[a, b, c]" or "[a, b, c, d]")
+optional:
+  user_profiles_sid.json  {uid: {text_sid_core, top_sids, ...}}
 
 Note: the notebook's poi_info also had a ``region`` column; ours does not, so
 the Region field is included only when present. The notebook shuffles without
@@ -71,10 +79,34 @@ def build_items(poi_info_csv, codebook_csv):
     return items
 
 
+def build_user_items(user_profiles_json):
+    """One 'profile -> top SIDs' alignment pair per user (user-conditioned SID priors)."""
+    with open(user_profiles_json, encoding="utf-8") as f:
+        profiles = json.load(f)
+    items, skipped = [], 0
+    for rec in profiles.values():
+        tops = rec.get("top_sids", [])
+        core = str(rec.get("text_sid_core", "")).strip()
+        if not tops or not core:
+            skipped += 1
+            continue
+        items.append({
+            "instruction": "Given a user profile, predict the semantic codes "
+                           "of POIs this user is likely to visit.",
+            "input": core,
+            "output": " ".join(tops),
+        })
+    if skipped:
+        print(f"[align] WARN: {skipped} users had no top SIDs/profile; skipped.")
+    return items
+
+
 def parse_args():
-    p = argparse.ArgumentParser(description="V2 SID<->attribute alignment data")
+    p = argparse.ArgumentParser(description="SID alignment data (POI + optional user pairs)")
     p.add_argument("--poi_info", required=True)
     p.add_argument("--codebook", required=True)
+    p.add_argument("--user_profiles", default=None,
+                   help="user_profiles_sid.json -> add profile<->SID pairs")
     p.add_argument("--out_train", required=True)
     p.add_argument("--out_val", required=True)
     p.add_argument("--val_frac", type=float, default=0.1)
@@ -89,6 +121,11 @@ def main():
         return
 
     items = build_items(args.poi_info, args.codebook)
+    print(f"[align] {len(items)} POI<->attribute pairs")
+    if args.user_profiles:
+        uitems = build_user_items(args.user_profiles)
+        print(f"[align] + {len(uitems)} profile<->SID pairs")
+        items += uitems
     if not items:
         print("[align] ERROR: no alignment samples produced; check inputs.", file=sys.stderr)
         sys.exit(1)

@@ -18,7 +18,7 @@ the last checkpoint.
 Example (paths are normally supplied by scripts/train.slurm):
 
     python finetune_llm.py \
-        --base_model Qwen/Qwen2.5-1.5B-Instruct \
+        --base_model meta-llama/Meta-Llama-3-8B \
         --train_file ../datasets/nyc/llm_train.json \
         --output_dir ../runs/nyc_.../sft \
         --save_steps 200 --save_total_limit 5
@@ -47,6 +47,13 @@ PROMPT_TEMPLATE = (
     "### Response:\n"
 )
 
+# Optional user-profile block, prepended ahead of the instruction. Records that
+# carry a non-empty "profile" field (the SID-aware GenUP profile produced by
+# build_uaware_data.py) get it; everything else is unchanged. Kept in its own
+# (protected) segment so a long check-in history is truncated *before* the
+# profile is -- see encode_prompt_ids.
+PROFILE_TEMPLATE = "### User Profile:\n{profile}\n\n"
+
 SID_RE = re.compile(r"<([abcd])_(\d+)>")
 
 
@@ -61,11 +68,52 @@ def load_items(path):
     return items
 
 
-def build_prompt(ex):
-    return PROMPT_TEMPLATE.format(
+def build_prompt_parts(ex):
+    """(protected_head, truncatable_body) for one example.
+
+    head  = the user-profile block (empty string when the record has no
+            non-empty 'profile' field).
+    body  = the Alpaca instruction/input/response-header. Its tail (the
+            "When ... is likely to visit:" query) must survive truncation, so
+            the body is left-truncated (keep the tail) while the head is kept
+            whole.
+    """
+    profile = str(ex.get("profile", "")).strip()
+    head = PROFILE_TEMPLATE.format(profile=profile) if profile else ""
+    body = PROMPT_TEMPLATE.format(
         instruction=str(ex.get("instruction", "")).strip(),
         input=str(ex.get("input", "")).strip(),
     )
+    return head, body
+
+
+def build_prompt(ex):
+    head, body = build_prompt_parts(ex)
+    return head + body
+
+
+def encode_prompt_ids(tokenizer, ex, max_prompt_len):
+    """Prompt token ids, protecting the profile head under truncation.
+
+    Only the body (instruction + long history) is left-truncated to fit
+    ``max_prompt_len``; the profile head is kept whole, so both the profile
+    (front) and the query (tail of the body) survive. With no profile this is
+    identical to left-truncating the whole prompt -- the previous behaviour.
+    Shared by training (SFTDataset) and eval (eval_llm.py) so the two tokenise
+    identically.
+    """
+    head, body = build_prompt_parts(ex)
+    head_ids = tokenizer(head, add_special_tokens=False)["input_ids"] if head else []
+    body_ids = tokenizer(body, add_special_tokens=False)["input_ids"]
+    if max_prompt_len <= 0:
+        return []
+    avail = max_prompt_len - len(head_ids)
+    if avail < 1:
+        # Pathological: the profile alone exceeds the budget. Keep its tail.
+        return head_ids[-max_prompt_len:]
+    if len(body_ids) > avail:
+        body_ids = body_ids[-avail:]
+    return head_ids + body_ids
 
 
 def collect_sid_tokens(*item_lists):
@@ -93,17 +141,16 @@ class SFTDataset(Dataset):
     def __getitem__(self, i):
         ex = self.items[i]
         eos = self.tok.eos_token or ""
-        prompt_ids = self.tok(build_prompt(ex), add_special_tokens=False)["input_ids"]
         resp_ids = self.tok(str(ex.get("output", "")).strip() + eos,
                             add_special_tokens=False)["input_ids"]
 
-        # Keep the (short) response intact; left-truncate the (long) history.
+        # Keep the (short) response intact; truncate the prompt to fit, keeping
+        # the profile head whole and only left-truncating the history.
         max_prompt = self.max_len - len(resp_ids)
         if max_prompt < 1:
             resp_ids = resp_ids[: self.max_len - 1]
             max_prompt = 1
-        if len(prompt_ids) > max_prompt:
-            prompt_ids = prompt_ids[-max_prompt:]
+        prompt_ids = encode_prompt_ids(self.tok, ex, max_prompt)
 
         input_ids = prompt_ids + resp_ids
         labels = [-100] * len(prompt_ids) + list(resp_ids)
@@ -147,7 +194,7 @@ def make_training_args(**kw):
 
 def parse_args():
     p = argparse.ArgumentParser(description="GNPR-SID V1 LLM fine-tuning")
-    p.add_argument("--base_model", default=os.environ.get("BASE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct"))
+    p.add_argument("--base_model", default=os.environ.get("BASE_MODEL", "meta-llama/Meta-Llama-3-8B"))
     p.add_argument("--train_file", required=True)
     p.add_argument("--val_file", default=None)
     p.add_argument("--output_dir", required=True)

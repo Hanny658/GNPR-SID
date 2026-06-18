@@ -16,13 +16,20 @@ scripts/
 ├── v2_env.sh         # fully-V2 pipeline: V2 recipe knobs + V2/runs/ layout
 ├── v2_data.slurm     # fully-V2: SID build + SID<->attribute alignment data
 ├── v2_train.slurm    # fully-V2: [embed-align ->] SFT (V2 hyper-parameters)
-└── v2_eval.slurm     # fully-V2: same eval protocol on the V2 run
+├── v2_eval.slurm     # fully-V2: same eval protocol on the V2 run
+├── uaware_env.sh     # user-aware (GenUP x SID): PROFILE_MODE + V2/runs/_uaware layout
+├── uaware_data.slurm # user-aware: SID build + SID-aware profiles + fused/align data
+├── uaware_train.slurm# user-aware: [embed-align (POI[+profile]) ->] SFT w/ profile
+└── uaware_eval.slurm # user-aware: eval on the fused test set + stratified Acc@1
 ```
 
 The fine-tune/eval/data-build Python drivers live in `V1/code/`:
 `finetune_llm.py`, `eval_llm.py`, `build_dataset.py`, plus the V2-pipeline
 helper `build_align_data.py` (`merge_adapter.py` is also present for ad-hoc
-LoRA merges, but the V2 align path no longer needs it).
+LoRA merges, but the V2 align path no longer needs it). The user-aware pipeline
+adds `rewrite_profile_sid.py` (offline SID-aware profiles), `build_uaware_data.py`
+(inject a profile into each record) and `strat_eval.py` (cold-start / rare-POI
+breakdown).
 
 ## Quick start
 
@@ -185,6 +192,64 @@ Notes / caveats:
 - The authors' effective SFT batch is 8×2 = 16 (vs 64 in the V1 paper recipe);
   per-device batch 8 at length 3072 fits a 1.5B model on the L40S but may OOM
   with an 8B base — lower `V2_SFT_BS` (and raise `V2_SFT_ACCUM`) if so.
+
+## User-aware pipeline — GenUP × GNPR-SID (`uaware_*.slurm`)
+
+Fuses the **user side** of GenUP (SIGSPATIAL'25) with the **POI side** of
+GNPR-SID. Both train on the same `w11wo/LLM4POI` data, so user/POI ids line up.
+GenUP's per-user profile (traits, demographics, preferences, routines, a
+narrative) is made **SID-aware** — its raw "POI id N" mentions are rewritten to
+SID tokens via the codebook, and the user's top SIDs are appended — then injected
+into the recommender prompt in a truncation-protected `### User Profile:` block.
+The alignment stage additionally grounds **profile → SID** priors.
+
+```
+uaware_data.slurm   SID build (+ poi_info/codebook) -> SID-aware profiles
+                    (rewrite_profile_sid.py) -> fused llm_{train,test}_uaware[_raw].json
+                    -> POI[+profile]<->SID alignment data
+uaware_train.slurm  Phase A embed-align (POI[+profile] pairs) -> Phase B SFT w/ profile
+uaware_eval.slurm   beam-search Acc@k/MRR/NDCG + strat_eval.py (cold users / rare POIs)
+```
+
+Three ablation arms, selected by `PROFILE_MODE` (each gets its own
+`V2/runs/<ds>_<model>_uaware_<mode>` dir):
+
+| arm | `PROFILE_MODE` | profile injected | alignment | tests |
+|---|---|---|---|---|
+| **B0** | `none` | — | POI-only | POI-side baseline on this SID space |
+| **B1** | `raw` | GenUP raw (POI-id) | POI-only | user side **without** SID-awareness |
+| **B2** | `sid` | SID-rewritten (+ affinity line) | POI **+ profile↔SID** | full fusion (ours) |
+
+```bash
+# default base model is meta-llama/Meta-Llama-3-8B (gated -> accept the license and
+# export HF_TOKEN before prepare_env). Profiles come from a sibling GenUP checkout:
+# ../GenUP/data/<ds>/user_profiles/
+# NYC ships prebaked llm_*.json but no codebook/poi_info -> force a from-raw build first:
+rm -f V1/datasets/nyc/llm_*.json
+PREBAKED_DATASETS="" DATASET=nyc sbatch scripts/data.slurm
+
+DATASET=nyc sbatch scripts/uaware_data.slurm
+for m in none raw sid; do
+  PROFILE_MODE=$m DATASET=nyc sbatch scripts/uaware_train.slurm
+done
+# then uaware_eval.slurm per PROFILE_MODE; compare B0/B1/B2 (overall + stratified)
+# smaller-model smoke test: add  BASE_MODEL=Qwen/Qwen2.5-1.5B-Instruct  to each line.
+```
+
+Notes:
+- **8B default.** The base model defaults to `meta-llama/Meta-Llama-3-8B`. The
+  SFT/align micro-batches default to 8B-safe values on a 48G GPU (per-device 2 /
+  4, effective batch preserved at 16 / 32 via `V2_SFT_ACCUM` / `V2_ALIGN_ACCUM`).
+  If eval OOMs at length 3072 with 10 beams, drop `EVAL_BATCH_SIZE` to 2; raise
+  the per-device batches for smaller models.
+- **Offline / reproducible.** Profiles are rewritten deterministically from
+  GenUP's committed JSON — no OpenAI key or network. Point `GENUP_DIR` /
+  `GENUP_PROFILES_DIR` at GenUP's `data/<ds>/user_profiles`.
+- `EVAL_MAX_NEW_TOKENS` defaults to **32** here (atomic 4-atom SIDs need ~5
+  tokens; the old 12 truncated them). The profile block is protected so only the
+  middle of a long history is dropped — the profile and the query both survive.
+- Like V2, no published reference numbers exist; the result is the internal
+  **B2 > B1 > B0** ablation (largest gap expected on cold-start users / rare POIs).
 
 ## Resume / "skip when finished" semantics
 

@@ -24,11 +24,10 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-PROMPT_TEMPLATE = (
-    "### Instruction:\n{instruction}\n\n"
-    "### Input:\n{input}\n\n"
-    "### Response:\n"
-)
+# Share the exact prompt construction + profile-protected truncation with the
+# trainer so eval tokenises identically to training (no train/infer skew).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from finetune_llm import encode_prompt_ids  # noqa: E402
 
 # First contiguous run of SID atoms, e.g. "<a_50><b_15><c_62>" (optionally <d_*>).
 SID_RUN_RE = re.compile(r"(?:<[abcd]_\d+>)+")
@@ -37,13 +36,6 @@ SID_RUN_RE = re.compile(r"(?:<[abcd]_\d+>)+")
 def load_items(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def build_prompt(ex):
-    return PROMPT_TEMPLATE.format(
-        instruction=str(ex.get("instruction", "")).strip(),
-        input=str(ex.get("input", "")).strip(),
-    )
 
 
 def normalize_sid(text):
@@ -110,9 +102,11 @@ def load_model(model_dir, base_override):
 
 
 @torch.no_grad()
-def generate_batch(model, tokenizer, prompts, num_beams, max_new_tokens, max_prompt_len):
-    enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True,
-                    max_length=max_prompt_len, add_special_tokens=False)
+def generate_batch(model, tokenizer, batch, num_beams, max_new_tokens, max_prompt_len):
+    # Tokenise each prompt with the SAME profile-protected truncation as training
+    # (encode_prompt_ids), then left-pad the batch (tokenizer.padding_side="left").
+    ids = [encode_prompt_ids(tokenizer, ex, max_prompt_len) for ex in batch]
+    enc = tokenizer.pad({"input_ids": ids}, padding=True, return_tensors="pt")
     enc = {k: v.to(model.device) for k, v in enc.items()}
     out = model.generate(
         **enc,
@@ -128,7 +122,7 @@ def generate_batch(model, tokenizer, prompts, num_beams, max_new_tokens, max_pro
     texts = tokenizer.batch_decode(gen, skip_special_tokens=False)
     # regroup into [batch][num_beams]
     preds = []
-    for b in range(len(prompts)):
+    for b in range(len(batch)):
         cand = []
         for r in range(num_beams):
             sid = normalize_sid(texts[b * num_beams + r])
@@ -154,8 +148,7 @@ def run_generation(args, tokenizer, model, items, pred_path):
         n = len(items)
         while i < n:
             batch = items[i: i + args.batch_size]
-            prompts = [build_prompt(ex) for ex in batch]
-            preds = generate_batch(model, tokenizer, prompts, args.num_beams,
+            preds = generate_batch(model, tokenizer, batch, args.num_beams,
                                    args.max_new_tokens, args.max_prompt_len)
             for j, ex in enumerate(batch):
                 rec = {
