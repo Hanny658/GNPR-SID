@@ -88,12 +88,29 @@ else
         --out_val   "${DATA_DIR}/llm_align_val.json"
 fi
 
-# ---- (c)-(e) profile-dependent artifacts -----------------------------------
+# ---- GenUP method: the prompt carries only the recent trajectory -----------
+# (HISTORY_KEEP_LAST visits); the user's full history reaches the model via the
+# profile. Files are tagged by the window so a recency sweep never collides.
+HTAG=$( [[ "${HISTORY_KEEP_LAST}" -lt 0 ]] && echo hfull || echo "h${HISTORY_KEEP_LAST}" )
+echo "[uaware-data] fused datasets: history_keep_last=${HISTORY_KEEP_LAST} (tag ${HTAG})"
+
+# (b2) 'none' arm (no profile) -- always buildable, even without GenUP profiles.
+for split in train test; do
+    src="${DATA_DIR}/llm_${split}.json"
+    [[ -f "${src}" ]] || { echo "[uaware-data] WARN: ${src} missing; skipping ${split}."; continue; }
+    out="${DATA_DIR}/llm_${split}_uaware_none_${HTAG}.json"
+    if [[ -f "${out}" ]]; then echo "[uaware-data] ${out} present; skipping."
+    else python "${CODE_DIR}/build_uaware_data.py" \
+            --in_json "${src}" --field none \
+            --history_keep_last "${HISTORY_KEEP_LAST}" --out_json "${out}"; fi
+done
+
+# ---- (c)-(e) profile-dependent artifacts (raw/sid arms) --------------------
 if [[ ! -d "${GENUP_PROFILES_DIR}" ]]; then
     echo "[uaware-data] WARN: GenUP profiles not found at ${GENUP_PROFILES_DIR}." >&2
-    echo "[uaware-data]       Only the B0 arm (PROFILE_MODE=none) can run." >&2
+    echo "[uaware-data]       Only the none arm (PROFILE_MODE=none) can run." >&2
     echo "[uaware-data]       Set GENUP_DIR/GENUP_PROFILES_DIR to GenUP's data/<ds>/user_profiles." >&2
-    echo "[uaware-data] done (B0-only). next: PROFILE_MODE=none sbatch scripts/uaware_train.slurm"
+    echo "[uaware-data] done (none-only). next: PROFILE_MODE=none sbatch scripts/uaware_train.slurm"
     exit 0
 fi
 
@@ -110,20 +127,17 @@ else
         --top_n "${PROFILE_TOP_N}"
 fi
 
-# (d) fused datasets -- build both SID and raw variants so B1/B2 need no rebuild
+# (d) raw + sid fused datasets (recent-trajectory prompt + profile)
 for split in train test; do
     src="${DATA_DIR}/llm_${split}.json"
-    [[ -f "${src}" ]] || { echo "[uaware-data] WARN: ${src} missing; skipping ${split} fusion."; continue; }
+    [[ -f "${src}" ]] || continue
     for mode in sid raw; do
-        if [[ "${mode}" == "sid" ]]; then field="text_sid"; out="${DATA_DIR}/llm_${split}_uaware.json"
-        else                              field="text_raw"; out="${DATA_DIR}/llm_${split}_uaware_raw.json"; fi
-        if [[ -f "${out}" ]]; then
-            echo "[uaware-data] ${out} present; skipping."
-        else
-            python "${CODE_DIR}/build_uaware_data.py" \
+        if [[ "${mode}" == "sid" ]]; then field="text_sid"; out="${DATA_DIR}/llm_${split}_uaware_${HTAG}.json"
+        else                              field="text_raw"; out="${DATA_DIR}/llm_${split}_uaware_raw_${HTAG}.json"; fi
+        if [[ -f "${out}" ]]; then echo "[uaware-data] ${out} present; skipping."
+        else python "${CODE_DIR}/build_uaware_data.py" \
                 --in_json "${src}" --profiles "${PROFILES_SID_JSON}" \
-                --field "${field}" --out_json "${out}"
-        fi
+                --field "${field}" --history_keep_last "${HISTORY_KEEP_LAST}" --out_json "${out}"; fi
     done
 done
 

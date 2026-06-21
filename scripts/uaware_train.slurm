@@ -123,6 +123,7 @@ FT_ARGS=(
     --max_seq_len "${V2_SFT_MAX_SEQ_LEN}"
     --save_steps "${SAVE_STEPS}"
     --save_total_limit "${SAVE_TOTAL_LIMIT}"
+    --save_only_model "${SAVE_ONLY_MODEL}"
 )
 if [[ -f "${DATA_DIR}/llm_val.json" ]]; then
     FT_ARGS+=( --val_file "${DATA_DIR}/llm_val.json" )

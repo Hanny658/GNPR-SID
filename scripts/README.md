@@ -196,12 +196,20 @@ Notes / caveats:
 ## User-aware pipeline — GenUP × GNPR-SID (`uaware_*.slurm`)
 
 Fuses the **user side** of GenUP (SIGSPATIAL'25) with the **POI side** of
-GNPR-SID. Both train on the same `w11wo/LLM4POI` data, so user/POI ids line up.
-GenUP's per-user profile (traits, demographics, preferences, routines, a
-narrative) is made **SID-aware** — its raw "POI id N" mentions are rewritten to
-SID tokens via the codebook, and the user's top SIDs are appended — then injected
-into the recommender prompt in a truncation-protected `### User Profile:` block.
-The alignment stage additionally grounds **profile → SID** priors.
+GNPR-SID, following **GenUP's method**: the user's *full* history is summarised
+**offline** into the profile, and the **prompt carries only the recent
+trajectory** (`HISTORY_KEEP_LAST` visits) — not the full history. Both train on
+the same `w11wo/LLM4POI` data, so user/POI ids line up. GenUP's per-user profile
+(traits, demographics, preferences, routines, a narrative) is made **SID-aware**
+— its raw "POI id N" mentions are rewritten to SID tokens via the codebook, and
+the user's top SIDs are appended — then injected into the prompt in a
+truncation-protected `### User Profile:` block. The alignment stage additionally
+grounds **profile → SID** priors. This setup is built to study **whether
+Semantic IDs help the cold-start regime** under GenUP's method: with the full
+history removed from the prompt, accuracy on thin-history users depends on what
+the (SID-aware) profile can carry. Compare against GenUP's own repo (raw POI
+ids) for the no-SID baseline; sweep `HISTORY_KEEP_LAST` (e.g. `-1, 15, 8, 3, 0`)
+to trade raw trajectory for profile.
 
 ```
 uaware_data.slurm   SID build (+ poi_info/codebook) -> SID-aware profiles
@@ -211,14 +219,15 @@ uaware_train.slurm  Phase A embed-align (POI[+profile] pairs) -> Phase B SFT w/ 
 uaware_eval.slurm   beam-search Acc@k/MRR/NDCG + strat_eval.py (cold users / rare POIs)
 ```
 
-Three ablation arms, selected by `PROFILE_MODE` (each gets its own
-`V2/runs/<ds>_<model>_uaware_<mode>` dir):
+Three ablation arms, selected by `PROFILE_MODE`. Each arm + history window gets
+its own files (`llm_*_uaware[_raw|_none]_h<K>.json`) and run dir
+(`V2/runs/<ds>_<model>_uaware_<mode>_h<K>`), so a recency sweep never collides:
 
-| arm | `PROFILE_MODE` | profile injected | alignment | tests |
-|---|---|---|---|---|
-| **B0** | `none` | — | POI-only | POI-side baseline on this SID space |
-| **B1** | `raw` | GenUP raw (POI-id) | POI-only | user side **without** SID-awareness |
-| **B2** | `sid` | SID-rewritten (+ affinity line) | POI **+ profile↔SID** | full fusion (ours) |
+| arm | `PROFILE_MODE` | prompt | profile | alignment | tests |
+|---|---|---|---|---|---|
+| **B0** | `none` | recent trajectory | — | POI-only | recent-trajectory baseline (no profile) |
+| **B1** | `raw` | recent traj. + profile | GenUP raw (POI-id) | POI-only | user side **without** SID-awareness |
+| **B2** | `sid` | recent traj. + profile | SID-rewritten (+ affinity line) | POI **+ profile↔SID** | full fusion (ours) |
 
 ```bash
 # default base model is meta-llama/Meta-Llama-3-8B (gated -> accept the license and
@@ -228,6 +237,8 @@ Three ablation arms, selected by `PROFILE_MODE` (each gets its own
 rm -f V1/datasets/nyc/llm_*.json
 PREBAKED_DATASETS="" DATASET=nyc sbatch scripts/data.slurm
 
+# HISTORY_KEEP_LAST=8 by default (GenUP recent-trajectory). Set it (same value on
+# data + train + eval) to change the window; -1 keeps the full GNPR-SID history.
 DATASET=nyc sbatch scripts/uaware_data.slurm
 for m in none raw sid; do
   PROFILE_MODE=$m DATASET=nyc sbatch scripts/uaware_train.slurm
@@ -251,6 +262,13 @@ Notes:
   (~16 GB, the SFT base). Budget ~16 GB per arm for `align/final` (B0 and B1 use
   identical POI-only alignment, so you can reuse one across them); point
   `RUN_DIR` at scratch if your home quota is tight.
+- **SFT keeps training the SID embeddings (don't freeze them).** Whenever SID
+  tokens are used, `embed_tokens`/`lm_head` stay in `modules_to_save` so the
+  *recommendation* objective keeps steering the output head — freezing them
+  (relying on alignment alone) collapses Acc@1 to ~0. That makes each checkpoint
+  carry a ~2 GB embedding matrix, so the uaware SFT defaults to `SAVE_ONLY_MODEL=1`
+  (drops the ~8 GB optimizer state) and `SAVE_TOTAL_LIMIT=2` — a few GB total
+  instead of the ~50 GB that `SAVE_TOTAL_LIMIT=5` + optimizer produced.
 - **Offline / reproducible.** Profiles are rewritten deterministically from
   GenUP's committed JSON — no OpenAI key or network. Point `GENUP_DIR` /
   `GENUP_PROFILES_DIR` at GenUP's `data/<ds>/user_profiles`.

@@ -18,15 +18,21 @@
 #   PROFILE_MODE=sid   -> B2  SID-aware profile (ours) (POI + profile<->SID align)
 # ---------------------------------------------------------------------------
 
-# Snapshot any explicit EVAL_MAX_NEW_TOKENS before env.sh sets its 12 default;
-# 4-atom SIDs need ~5 tokens incl. EOS, so this pipeline defaults to 32.
+# Snapshot any explicit overrides before env.sh applies its own defaults.
+# 4-atom SIDs need ~5 tokens incl. EOS, so this pipeline defaults eval to 32.
 _UAW_EVAL_MNT="${EVAL_MAX_NEW_TOKENS:-}"
+_UAW_STL="${SAVE_TOTAL_LIMIT:-}"
 
 _UAW_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${_UAW_ENV_DIR}/env.sh"
 
 export EVAL_MAX_NEW_TOKENS="${_UAW_EVAL_MNT:-32}"
+# SFT trains embed_tokens/lm_head (modules_to_save) so each checkpoint carries a
+# ~2GB embedding matrix; keep a short sliding window and drop optimizer state so
+# the SFT run stays small (~a few GB) instead of tens of GB.
+export SAVE_TOTAL_LIMIT="${_UAW_STL:-2}"
+export SAVE_ONLY_MODEL="${SAVE_ONLY_MODEL:-1}"
 
 # ------------------------- V2 recipe knobs (mirror v2_env.sh) ---------------
 # Default base model is meta-llama/Meta-Llama-3-8B (env.sh). The per-device
@@ -65,12 +71,24 @@ export GENUP_PROFILES_DIR="${GENUP_PROFILES_DIR:-${GENUP_DIR}/data/${DATASET}/us
 export PROFILES_SID_JSON="${PROFILES_SID_JSON:-${DATA_DIR}/user_profiles_sid.json}"
 export PROFILE_TOP_N="${PROFILE_TOP_N:-10}"
 
+# GenUP method: the user's FULL history feeds only the (offline) profile, while
+# the PROMPT carries just the most recent HISTORY_KEEP_LAST visits (the "current
+# trajectory"). This is what makes the cold-start study meaningful -- a rich
+# history can't be smuggled into the prompt. Set -1 to keep the full GNPR-SID
+# history; 0 for profile-only. Sweep it (e.g. -1, 15, 8, 3, 0) to study how much
+# the SID-aware profile can substitute for raw trajectory.
+export HISTORY_KEEP_LAST="${HISTORY_KEEP_LAST:-8}"
+
 case "${PROFILE_MODE}" in
-    sid)  _UAW_FIELD="text_sid"; _UAW_SUF="_uaware";     _UAW_AUP_DEFAULT=1 ;;
-    raw)  _UAW_FIELD="text_raw"; _UAW_SUF="_uaware_raw"; _UAW_AUP_DEFAULT=0 ;;
-    none) _UAW_FIELD="";         _UAW_SUF="";            _UAW_AUP_DEFAULT=0 ;;
+    sid)  _UAW_FIELD="text_sid"; _UAW_SUF="_uaware";      _UAW_AUP_DEFAULT=1 ;;
+    raw)  _UAW_FIELD="text_raw"; _UAW_SUF="_uaware_raw";  _UAW_AUP_DEFAULT=0 ;;
+    none) _UAW_FIELD="none";     _UAW_SUF="_uaware_none"; _UAW_AUP_DEFAULT=0 ;;
     *) echo "[uaware] ERROR: PROFILE_MODE must be sid|raw|none (got '${PROFILE_MODE}')" >&2; return 1 ;;
 esac
+# Tag fused data + run dir by the history window so different HISTORY_KEEP_LAST
+# values (a recency sweep) never share files or checkpoints.
+if [[ "${HISTORY_KEEP_LAST}" -lt 0 ]]; then _UAW_HTAG="hfull"; else _UAW_HTAG="h${HISTORY_KEEP_LAST}"; fi
+_UAW_SUF="${_UAW_SUF}_${_UAW_HTAG}"
 export UAWARE_FIELD="${_UAW_FIELD}"
 export UAWARE_TRAIN_JSON="${DATA_DIR}/llm_train${_UAW_SUF}.json"
 export UAWARE_TEST_JSON="${DATA_DIR}/llm_test${_UAW_SUF}.json"
@@ -88,7 +106,7 @@ else
 fi
 
 # ------------------------- run layout (one dir per arm) --------------------
-export UAWARE_RUN_NAME="${UAWARE_RUN_NAME:-${DATASET}_${_MODEL_TAG}_uaware_${PROFILE_MODE}}"
+export UAWARE_RUN_NAME="${UAWARE_RUN_NAME:-${DATASET}_${_MODEL_TAG}_uaware_${PROFILE_MODE}_${_UAW_HTAG}}"
 export RUN_DIR="${PROJECT_ROOT}/V2/runs/${UAWARE_RUN_NAME}"
 export SID_DIR="${RUN_DIR}/sid"
 export SFT_DIR="${RUN_DIR}/sft"
@@ -101,7 +119,7 @@ make_uaware_run_dirs() { make_run_dirs; mkdir -p "${ALIGN_DIR}"; }
 print_uaware_config() {
     cat <<CFG
 [env] ================= user-aware (GenUP x SID) config ==========
-[env] PROFILE_MODE  : ${PROFILE_MODE}  (field='${UAWARE_FIELD:-none}')
+[env] PROFILE_MODE  : ${PROFILE_MODE}  (field='${UAWARE_FIELD}')  history_keep_last=${HISTORY_KEEP_LAST} ($( [[ "${HISTORY_KEEP_LAST}" -lt 0 ]] && echo 'full history' || echo 'GenUP recent-trajectory' ))
 [env] RUN_DIR       : ${RUN_DIR}
 [env] GenUP profiles: $( [[ -d "${GENUP_PROFILES_DIR}" ]] && echo present || echo MISSING ) (${GENUP_PROFILES_DIR})
 [env] profiles json : $( [[ -f "${PROFILES_SID_JSON}" ]] && echo present || echo missing ) (${PROFILES_SID_JSON})  top_n=${PROFILE_TOP_N}
