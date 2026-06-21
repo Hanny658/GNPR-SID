@@ -33,9 +33,15 @@ def train_stats(train_json):
         items = json.load(f)
     activity, popularity = {}, {}
     for ex in items:
+        inp = str(ex.get("input", ""))
         u = _user_of(ex)
         if u is not None:
-            activity[u] = activity.get(u, 0) + 1
+            # user activity = total training check-ins (the cold-start axis),
+            # counted as the "<time> visited <SID>" items in the history. Counting
+            # records would be degenerate here (KEEP_LAST_K caps records/user).
+            # NOTE: pass the BASE llm_train.json (full history), not a recent-only
+            # uaware file, or this is capped at HISTORY_KEEP_LAST.
+            activity[u] = activity.get(u, 0) + inp.count(" visited ")
         for field in ("input", "output"):
             for sid in SID_RUN_RE.findall(str(ex.get(field, ""))):
                 popularity[sid] = popularity.get(sid, 0) + 1

@@ -184,12 +184,22 @@ class PadCollator:
 # training-args builder (robust to the eval_strategy/evaluation_strategy rename)
 # --------------------------------------------------------------------------- #
 def make_training_args(**kw):
-    try:
-        return TrainingArguments(**kw)
-    except TypeError:
-        if "eval_strategy" in kw:
-            kw["evaluation_strategy"] = kw.pop("eval_strategy")
-        return TrainingArguments(**kw)
+    """Build TrainingArguments, tolerating the eval_strategy rename and any
+    kwarg (e.g. save_only_model) an older transformers doesn't accept."""
+    while True:
+        try:
+            return TrainingArguments(**kw)
+        except TypeError as e:
+            if "eval_strategy" in kw and "evaluation_strategy" not in kw:
+                kw["evaluation_strategy"] = kw.pop("eval_strategy")
+                continue
+            m = re.search(r"unexpected keyword argument '(\w+)'", str(e))
+            if m and m.group(1) in kw:
+                print(f"[finetune] WARNING: TrainingArguments has no '{m.group(1)}' "
+                      f"in this transformers version; dropping it.")
+                kw.pop(m.group(1))
+                continue
+            raise
 
 
 def parse_args():
@@ -219,6 +229,9 @@ def parse_args():
     p.add_argument("--max_seq_len", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "2048")))
     p.add_argument("--save_steps", type=int, default=int(os.environ.get("SAVE_STEPS", "50")))
     p.add_argument("--save_total_limit", type=int, default=int(os.environ.get("SAVE_TOTAL_LIMIT", "5")))
+    # Save model-only checkpoints (no optimizer/scheduler) -- much smaller when
+    # embed_tokens/lm_head are in modules_to_save; resume re-inits the optimizer.
+    p.add_argument("--save_only_model", type=int, default=int(os.environ.get("SAVE_ONLY_MODEL", "0")))
     p.add_argument("--eval_during_train", type=int, default=int(os.environ.get("EVAL_DURING_TRAIN", "0")))
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
@@ -291,10 +304,15 @@ def main():
     tokenizer.padding_side = "right"
 
     sid_tokens = []
+    added = 0  # number of NEW SID tokens this run adds (0 if the base already has them)
     if args.add_sid_tokens:
         sid_tokens = collect_sid_tokens(train_items, val_items or [])
         added = tokenizer.add_special_tokens({"additional_special_tokens": sid_tokens})
         print(f"[finetune] added {added} atomic SID tokens (vocab now {len(tokenizer)})")
+        if added == 0:
+            print("[finetune] SID tokens already present in the base vocab (e.g. an "
+                  "embed-aligned base); their embeddings are reused and kept trainable "
+                  "by this stage.")
 
     # ---------------- model ----------------
     bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -337,8 +355,15 @@ def main():
         from peft import LoraConfig, get_peft_model
 
         target_modules = [t for t in re.split(r"[,\s]+", args.lora_targets.strip()) if t]
-        # don't mark a module both a LoRA target and to-save (PEFT excludes
-        # modules_to_save from targeting -> "no modules targeted" if they overlap)
+        # When SID tokens are in play, embed_tokens + lm_head MUST keep being
+        # trained by the *recommendation* objective (not just the auxiliary
+        # alignment task) -- otherwise the frozen output head can't be steered to
+        # generate the right SID and Acc@1 collapses to ~0. So they go in
+        # modules_to_save whenever add_sid_tokens is set, including on top of an
+        # embed-aligned base (where SFT continues refining the aligned rows). To
+        # keep these checkpoints small we drop the optimizer state via
+        # --save_only_model rather than freezing the weights. (PEFT excludes
+        # modules_to_save from LoRA targeting, so drop any overlap.)
         modules_to_save = (["embed_tokens", "lm_head"] if args.add_sid_tokens else None)
         if modules_to_save:
             modules_to_save = [m for m in modules_to_save if m not in target_modules]
@@ -378,6 +403,8 @@ def main():
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,     # <- sliding window of N checkpoints
+        save_only_model=bool(args.save_only_model),  # drop optimizer state from ckpts
+
         eval_strategy=("steps" if eval_ds is not None else "no"),
         eval_steps=args.save_steps,
         bf16=bf16_ok,
